@@ -1,8 +1,7 @@
-
 import os
 import random
-
 import numpy as np
+
 from PIL import Image
 
 import torch
@@ -23,25 +22,34 @@ MODEL_DIR = "mhnet_flood_model"
 
 IMAGE_SIZE = 256
 
-BATCH_SIZE = 1
+# Keep this small because your dataset is relatively small
+BATCH_SIZE = 2
 
-EPOCHS = 10
+# Maximum number of epochs
+EPOCHS = 50
 
-LEARNING_RATE = 0.001
+# Reduced learning rate
+LEARNING_RATE = 0.0001
 
-MOMENTUM = 0.9
+# AdamW regularization
+WEIGHT_DECAY = 0.0005
 
-WEIGHT_DECAY = 0.0001
+# Minimum learning rate
+MIN_LR = 0.000001
 
-MIN_LR = 0.00001
-
+# MHNet masking
 MASK_RATIO = 0.25
 
 BASE_CHANNELS = 32
 
+# Number of images used for training
 TRAIN_SIZE = 300
 
+# Reproducibility
 SEED = 42
+
+# Early stopping
+PATIENCE = 8
 
 
 # ============================================================
@@ -67,6 +75,9 @@ np.random.seed(SEED)
 
 torch.manual_seed(SEED)
 
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+
 
 # ============================================================
 # DATASET
@@ -78,7 +89,8 @@ class FloodDataset(Dataset):
         self,
         image_files,
         image_dir,
-        mask_dir
+        mask_dir,
+        augment=False
     ):
 
         self.image_files = image_files
@@ -87,16 +99,21 @@ class FloodDataset(Dataset):
 
         self.mask_dir = mask_dir
 
+        self.augment = augment
+
+
     def __len__(self):
 
         return len(self.image_files)
+
 
     def __getitem__(self, index):
 
         image_name = self.image_files[index]
 
+
         # ----------------------------------------------------
-        # Image
+        # IMAGE PATH
         # ----------------------------------------------------
 
         image_path = os.path.join(
@@ -104,12 +121,18 @@ class FloodDataset(Dataset):
             image_name
         )
 
+
+        # ----------------------------------------------------
+        # LOAD IMAGE
+        # ----------------------------------------------------
+
         image = Image.open(
             image_path
         ).convert("RGB")
 
+
         # ----------------------------------------------------
-        # Corresponding flood mask
+        # CORRESPONDING MASK
         # ----------------------------------------------------
 
         mask_name = (
@@ -117,17 +140,20 @@ class FloodDataset(Dataset):
             + ".png"
         )
 
+
         mask_path = os.path.join(
             self.mask_dir,
             mask_name
         )
 
+
         mask = Image.open(
             mask_path
         ).convert("L")
 
+
         # ----------------------------------------------------
-        # Resize image
+        # RESIZE IMAGE
         # ----------------------------------------------------
 
         image = image.resize(
@@ -135,11 +161,12 @@ class FloodDataset(Dataset):
             Image.Resampling.BILINEAR
         )
 
+
         # ----------------------------------------------------
-        # Resize mask
+        # RESIZE MASK
         #
         # IMPORTANT:
-        # nearest-neighbor is used for segmentation masks.
+        # NEVER use bilinear interpolation for masks.
         # ----------------------------------------------------
 
         mask = mask.resize(
@@ -147,9 +174,93 @@ class FloodDataset(Dataset):
             Image.Resampling.NEAREST
         )
 
-        # ----------------------------------------------------
-        # Convert image to tensor
-        # ----------------------------------------------------
+
+        # ====================================================
+        # DATA AUGMENTATION
+        # ====================================================
+        #
+        # VERY IMPORTANT:
+        # The SAME transformation is applied to both
+        # image and flood mask.
+        #
+        # Otherwise the image and mask would no longer align.
+        # ====================================================
+
+        if self.augment:
+
+            # ------------------------------------------------
+            # RANDOM HORIZONTAL FLIP
+            # ------------------------------------------------
+
+            if random.random() < 0.5:
+
+                image = image.transpose(
+                    Image.Transpose.FLIP_LEFT_RIGHT
+                )
+
+                mask = mask.transpose(
+                    Image.Transpose.FLIP_LEFT_RIGHT
+                )
+
+
+            # ------------------------------------------------
+            # RANDOM VERTICAL FLIP
+            # ------------------------------------------------
+
+            if random.random() < 0.5:
+
+                image = image.transpose(
+                    Image.Transpose.FLIP_TOP_BOTTOM
+                )
+
+                mask = mask.transpose(
+                    Image.Transpose.FLIP_TOP_BOTTOM
+                )
+
+
+            # ------------------------------------------------
+            # RANDOM 90 DEGREE ROTATION
+            # ------------------------------------------------
+
+            rotation = random.randint(
+                0,
+                3
+            )
+
+            if rotation == 1:
+
+                image = image.transpose(
+                    Image.Transpose.ROTATE_90
+                )
+
+                mask = mask.transpose(
+                    Image.Transpose.ROTATE_90
+                )
+
+            elif rotation == 2:
+
+                image = image.transpose(
+                    Image.Transpose.ROTATE_180
+                )
+
+                mask = mask.transpose(
+                    Image.Transpose.ROTATE_180
+                )
+
+            elif rotation == 3:
+
+                image = image.transpose(
+                    Image.Transpose.ROTATE_270
+                )
+
+                mask = mask.transpose(
+                    Image.Transpose.ROTATE_270
+                )
+
+
+        # ====================================================
+        # IMAGE → TENSOR
+        # ====================================================
 
         image = np.array(
             image
@@ -157,9 +268,13 @@ class FloodDataset(Dataset):
             np.float32
         ) / 255.0
 
+
         image = torch.from_numpy(
             image
         )
+
+
+        # H,W,C → C,H,W
 
         image = image.permute(
             2,
@@ -167,14 +282,10 @@ class FloodDataset(Dataset):
             1
         )
 
-        # ----------------------------------------------------
-        # Flood mask
-        #
-        # flood_masks contain:
-        #
-        # 255 = flood
-        # 0   = background
-        # ----------------------------------------------------
+
+        # ====================================================
+        # MASK → TENSOR
+        # ====================================================
 
         mask = np.array(
             mask
@@ -182,43 +293,67 @@ class FloodDataset(Dataset):
             np.float32
         )
 
+
+        # 255 → 1
+        # 0   → 0
+
         mask = (
             mask > 127
         ).astype(
             np.float32
         )
 
+
         mask = torch.from_numpy(
             mask
         )
 
+
+        # Add channel dimension
+        #
+        # H,W → 1,H,W
+
         mask = mask.unsqueeze(0)
+
 
         return image, mask
 
 
 # ============================================================
-# FIND IMAGE/MASK PAIRS
+# FIND IMAGE / MASK PAIRS
 # ============================================================
 
 image_files = []
 
-for filename in os.listdir(IMAGE_DIR):
 
-    if filename.lower().endswith(".jpg"):
+for filename in os.listdir(
+    IMAGE_DIR
+):
+
+    if filename.lower().endswith(
+        ".jpg"
+    ):
 
         image_name = os.path.splitext(
             filename
         )[0]
 
-        mask_name = image_name + ".png"
+
+        mask_name = (
+            image_name
+            + ".png"
+        )
+
 
         mask_path = os.path.join(
             MASK_DIR,
             mask_name
         )
 
-        if os.path.exists(mask_path):
+
+        if os.path.exists(
+            mask_path
+        ):
 
             image_files.append(
                 filename
@@ -227,10 +362,22 @@ for filename in os.listdir(IMAGE_DIR):
 
 image_files.sort()
 
+
 print(
     "Total matching pairs:",
     len(image_files)
 )
+
+
+# ============================================================
+# CHECK DATASET SIZE
+# ============================================================
+
+if len(image_files) < 2:
+
+    raise RuntimeError(
+        "Not enough image/mask pairs found."
+    )
 
 
 # ============================================================
@@ -246,12 +393,19 @@ random.shuffle(
 # TRAIN / VALIDATION SPLIT
 # ============================================================
 
+train_count = min(
+    TRAIN_SIZE,
+    len(image_files) - 1
+)
+
+
 train_files = image_files[
-    :TRAIN_SIZE
+    :train_count
 ]
 
+
 val_files = image_files[
-    TRAIN_SIZE:
+    train_count:
 ]
 
 
@@ -259,6 +413,7 @@ print(
     "Training images:",
     len(train_files)
 )
+
 
 print(
     "Validation images:",
@@ -270,16 +425,23 @@ print(
 # DATASETS
 # ============================================================
 
+# AUGMENTATION ONLY FOR TRAINING
+
 train_dataset = FloodDataset(
     train_files,
     IMAGE_DIR,
-    MASK_DIR
+    MASK_DIR,
+    augment=True
 )
+
+
+# NO AUGMENTATION FOR VALIDATION
 
 val_dataset = FloodDataset(
     val_files,
     IMAGE_DIR,
-    MASK_DIR
+    MASK_DIR,
+    augment=False
 )
 
 
@@ -293,6 +455,7 @@ train_loader = DataLoader(
     shuffle=True,
     num_workers=0
 )
+
 
 val_loader = DataLoader(
     val_dataset,
@@ -312,13 +475,26 @@ model = MHNet(
     mask_ratio=MASK_RATIO
 )
 
-model = model.to(device)
+
+model = model.to(
+    device
+)
+
+
+print()
+print("MHNet created.")
+print(
+    "Base channels:",
+    BASE_CHANNELS
+)
+print(
+    "Mask ratio:",
+    MASK_RATIO
+)
 
 
 # ============================================================
 # BCE LOSS
-#
-# Paper Eq. (6)
 # ============================================================
 
 bce_loss = nn.BCEWithLogitsLoss()
@@ -326,8 +502,6 @@ bce_loss = nn.BCEWithLogitsLoss()
 
 # ============================================================
 # DICE LOSS
-#
-# Paper Eq. (7)
 # ============================================================
 
 def dice_loss(
@@ -340,27 +514,36 @@ def dice_loss(
         logits
     )
 
+
     batch_size = probabilities.shape[0]
+
 
     probabilities = probabilities.reshape(
         batch_size,
         -1
     )
 
+
     targets = targets.reshape(
         batch_size,
         -1
     )
 
+
     intersection = (
-        probabilities * targets
-    ).sum(dim=1)
+        probabilities
+        * targets
+    ).sum(
+        dim=1
+    )
+
 
     denominator = (
         probabilities.sum(dim=1)
         +
         targets.sum(dim=1)
     )
+
 
     dice = (
         2.0 * intersection
@@ -372,18 +555,12 @@ def dice_loss(
         epsilon
     )
 
+
     return 1.0 - dice.mean()
 
 
 # ============================================================
 # TOTAL LOSS
-#
-# Paper Eq. (8)
-#
-# Ltotal = alpha * LBCE + beta * LDice
-#
-# alpha = 0.5
-# beta  = 1.0
 # ============================================================
 
 def total_loss(
@@ -396,10 +573,14 @@ def total_loss(
         targets
     )
 
+
     loss_dice = dice_loss(
         logits,
         targets
     )
+
+
+    # BCE + Dice
 
     loss = (
         0.5 * loss_bce
@@ -407,38 +588,49 @@ def total_loss(
         1.0 * loss_dice
     )
 
+
     return loss
 
 
 # ============================================================
 # OPTIMIZER
+# ============================================================
 #
-# Paper:
+# CHANGED:
+#
+# OLD:
 # SGD
 # LR = 0.001
-# momentum = 0.9
-# weight decay = 0.0001
+#
+# NEW:
+# AdamW
+# LR = 0.0001
+# Weight decay = 0.0005
+#
+# This gives stronger regularization and a smaller update
+# step, which is useful when the training set is small.
 # ============================================================
 
-optimizer = torch.optim.SGD(
+optimizer = torch.optim.AdamW(
     model.parameters(),
     lr=LEARNING_RATE,
-    momentum=MOMENTUM,
     weight_decay=WEIGHT_DECAY
 )
 
 
 # ============================================================
-# COSINE ANNEALING
+# LEARNING RATE SCHEDULER
+# ============================================================
 #
-# Paper:
-# minimum LR = 0.00001
+# If validation loss stops improving, reduce learning rate.
 # ============================================================
 
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer,
-    T_max=EPOCHS,
-    eta_min=MIN_LR
+    mode="min",
+    factor=0.5,
+    patience=3,
+    min_lr=MIN_LR
 )
 
 
@@ -455,53 +647,122 @@ def calculate_metrics(
         logits
     )
 
+
     predictions = (
         probabilities >= 0.5
     ).float()
 
+
     targets = targets.float()
 
+
     tp = (
-        predictions * targets
+        predictions
+        * targets
     ).sum().item()
+
 
     fp = (
-        predictions * (1 - targets)
+        predictions
+        * (1 - targets)
     ).sum().item()
 
+
     fn = (
-        (1 - predictions) * targets
+        (1 - predictions)
+        * targets
     ).sum().item()
+
+
+    # --------------------------------------------------------
+    # IoU
+    # --------------------------------------------------------
 
     intersection = tp
 
-    union = tp + fp + fn
-
-    iou = (
-        intersection / union
-        if union > 0
-        else 1.0
+    union = (
+        tp
+        + fp
+        + fn
     )
 
-    precision = (
-        tp / (tp + fp)
-        if (tp + fp) > 0
-        else 0.0
-    )
 
-    recall = (
-        tp / (tp + fn)
-        if (tp + fn) > 0
-        else 0.0
-    )
+    if union > 0:
 
-    f1 = (
-        2 * precision * recall
-        /
-        (precision + recall)
-        if (precision + recall) > 0
-        else 0.0
-    )
+        iou = (
+            intersection
+            / union
+        )
+
+    else:
+
+        iou = 1.0
+
+
+    # --------------------------------------------------------
+    # PRECISION
+    # --------------------------------------------------------
+
+    if (
+        tp + fp
+        > 0
+    ):
+
+        precision = (
+            tp
+            /
+            (tp + fp)
+        )
+
+    else:
+
+        precision = 0.0
+
+
+    # --------------------------------------------------------
+    # RECALL
+    # --------------------------------------------------------
+
+    if (
+        tp + fn
+        > 0
+    ):
+
+        recall = (
+            tp
+            /
+            (tp + fn)
+        )
+
+    else:
+
+        recall = 0.0
+
+
+    # --------------------------------------------------------
+    # F1
+    # --------------------------------------------------------
+
+    if (
+        precision + recall
+        > 0
+    ):
+
+        f1 = (
+            2
+            * precision
+            * recall
+            /
+            (
+                precision
+                + recall
+            )
+        )
+
+    else:
+
+        f1 = 0.0
+
 
     return (
         iou,
@@ -512,7 +773,7 @@ def calculate_metrics(
 
 
 # ============================================================
-# TRAINING
+# MODEL DIRECTORY
 # ============================================================
 
 os.makedirs(
@@ -521,10 +782,28 @@ os.makedirs(
 )
 
 
+# ============================================================
+# BEST MODEL
+# ============================================================
+
 best_iou = 0.0
 
 
-for epoch in range(EPOCHS):
+# ============================================================
+# EARLY STOPPING
+# ============================================================
+
+epochs_without_improvement = 0
+
+
+# ============================================================
+# TRAINING
+# ============================================================
+
+for epoch in range(
+    EPOCHS
+):
+
 
     # ========================================================
     # TRAIN
@@ -532,48 +811,97 @@ for epoch in range(EPOCHS):
 
     model.train()
 
+
     train_loss = 0.0
+
 
     for batch_index, (
         images,
         masks
-    ) in enumerate(train_loader):
+    ) in enumerate(
+        train_loader
+    ):
 
-        images = images.to(device)
 
-        masks = masks.to(device)
+        images = images.to(
+            device
+        )
+
+
+        masks = masks.to(
+            device
+        )
+
+
+        # ----------------------------------------------------
+        # Clear gradients
+        # ----------------------------------------------------
 
         optimizer.zero_grad()
 
-        # Forward pass
+
+        # ----------------------------------------------------
+        # Forward
+        # ----------------------------------------------------
 
         outputs = model(
             images
         )
 
-        # Hybrid BCE + Dice
+
+        # ----------------------------------------------------
+        # Loss
+        # ----------------------------------------------------
 
         loss = total_loss(
             outputs,
             masks
         )
 
+
+        # ----------------------------------------------------
         # Backpropagation
+        # ----------------------------------------------------
 
         loss.backward()
 
+
+        # ----------------------------------------------------
+        # Gradient clipping
+        #
+        # Helps prevent unusually large updates.
+        # ----------------------------------------------------
+
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
+            max_norm=1.0
+        )
+
+
+        # ----------------------------------------------------
+        # Update model
+        # ----------------------------------------------------
+
         optimizer.step()
 
-        train_loss += loss.item()
+
+        train_loss += (
+            loss.item()
+        )
+
 
         if (
             batch_index + 1
         ) % 20 == 0:
 
             print(
-                f"Epoch [{epoch + 1}/{EPOCHS}] "
-                f"Batch [{batch_index + 1}/{len(train_loader)}] "
-                f"Loss: {loss.item():.4f}"
+                f"Epoch "
+                f"[{epoch + 1}/{EPOCHS}] "
+                f"Batch "
+                f"[{batch_index + 1}/"
+                f"{len(train_loader)}] "
+                f"Loss: "
+                f"{loss.item():.4f}"
             )
 
 
@@ -588,7 +916,9 @@ for epoch in range(EPOCHS):
 
     model.eval()
 
+
     validation_loss = 0.0
+
 
     total_iou = 0.0
 
@@ -603,20 +933,44 @@ for epoch in range(EPOCHS):
 
         for images, masks in val_loader:
 
-            images = images.to(device)
 
-            masks = masks.to(device)
+            images = images.to(
+                device
+            )
+
+
+            masks = masks.to(
+                device
+            )
+
+
+            # ------------------------------------------------
+            # Forward
+            # ------------------------------------------------
 
             outputs = model(
                 images
             )
+
+
+            # ------------------------------------------------
+            # Validation loss
+            # ------------------------------------------------
 
             loss = total_loss(
                 outputs,
                 masks
             )
 
-            validation_loss += loss.item()
+
+            validation_loss += (
+                loss.item()
+            )
+
+
+            # ------------------------------------------------
+            # Metrics
+            # ------------------------------------------------
 
             (
                 iou,
@@ -628,6 +982,7 @@ for epoch in range(EPOCHS):
                 masks
             )
 
+
             total_iou += iou
 
             total_precision += precision
@@ -637,9 +992,14 @@ for epoch in range(EPOCHS):
             total_f1 += f1
 
 
+    # ========================================================
+    # AVERAGES
+    # ========================================================
+
     validation_loss /= len(
         val_loader
     )
+
 
     mean_iou = (
         total_iou
@@ -647,17 +1007,20 @@ for epoch in range(EPOCHS):
         len(val_loader)
     )
 
+
     mean_precision = (
         total_precision
         /
         len(val_loader)
     )
 
+
     mean_recall = (
         total_recall
         /
         len(val_loader)
     )
+
 
     mean_f1 = (
         total_f1
@@ -670,9 +1033,15 @@ for epoch in range(EPOCHS):
     # LEARNING RATE
     # ========================================================
 
-    scheduler.step()
+    scheduler.step(
+        validation_loss
+    )
 
-    current_lr = optimizer.param_groups[0]["lr"]
+
+    current_lr = (
+        optimizer
+        .param_groups[0]["lr"]
+    )
 
 
     # ========================================================
@@ -680,41 +1049,55 @@ for epoch in range(EPOCHS):
     # ========================================================
 
     print()
-    print("=" * 60)
 
     print(
-        f"Epoch {epoch + 1}/{EPOCHS}"
+        "=" * 60
     )
 
     print(
-        f"Training Loss   : {train_loss:.4f}"
+        f"Epoch "
+        f"{epoch + 1}/{EPOCHS}"
     )
 
     print(
-        f"Validation Loss : {validation_loss:.4f}"
+        f"Training Loss   : "
+        f"{train_loss:.4f}"
     )
 
     print(
-        f"mIoU            : {mean_iou * 100:.2f}%"
+        f"Validation Loss : "
+        f"{validation_loss:.4f}"
     )
 
     print(
-        f"Precision       : {mean_precision * 100:.2f}%"
+        f"mIoU            : "
+        f"{mean_iou * 100:.2f}%"
     )
 
     print(
-        f"Recall          : {mean_recall * 100:.2f}%"
+        f"Precision       : "
+        f"{mean_precision * 100:.2f}%"
     )
 
     print(
-        f"F1 Score        : {mean_f1 * 100:.2f}%"
+        f"Recall          : "
+        f"{mean_recall * 100:.2f}%"
     )
 
     print(
-        f"Learning Rate   : {current_lr:.8f}"
+        f"F1 Score        : "
+        f"{mean_f1 * 100:.2f}%"
     )
 
-    print("=" * 60)
+    print(
+        f"Learning Rate   : "
+        f"{current_lr:.8f}"
+    )
+
+    print(
+        "=" * 60
+    )
+
     print()
 
 
@@ -726,10 +1109,14 @@ for epoch in range(EPOCHS):
 
         best_iou = mean_iou
 
+        epochs_without_improvement = 0
+
+
         save_path = os.path.join(
             MODEL_DIR,
             "mhnet_best.pth"
         )
+
 
         torch.save(
             {
@@ -751,6 +1138,7 @@ for epoch in range(EPOCHS):
             save_path
         )
 
+
         print(
             "✓ New best model saved:"
         )
@@ -759,10 +1147,68 @@ for epoch in range(EPOCHS):
             save_path
         )
 
+        print(
+            f"✓ Best mIoU: "
+            f"{best_iou * 100:.2f}%"
+        )
+
+
+    else:
+
+        epochs_without_improvement += 1
+
+
+        print(
+            f"No mIoU improvement "
+            f"for "
+            f"{epochs_without_improvement} "
+            f"epoch(s)."
+        )
+
+
+    # ========================================================
+    # EARLY STOPPING
+    # ========================================================
+
+    if (
+        epochs_without_improvement
+        >= PATIENCE
+    ):
+
+        print()
+
+        print(
+            "Early stopping triggered."
+        )
+
+        print(
+            f"Validation mIoU did not "
+            f"improve for "
+            f"{PATIENCE} epochs."
+        )
+
+        break
+
+
+# ============================================================
+# FINISHED
+# ============================================================
 
 print()
-print("Training finished.")
+
+print(
+    "=" * 60
+)
+
+print(
+    "Training finished."
+)
+
 print(
     "Best Validation mIoU:",
     f"{best_iou * 100:.2f}%"
+)
+
+print(
+    "=" * 60
 )
