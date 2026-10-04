@@ -237,7 +237,41 @@ tp = np.logical_and(
     predicted_mask == 1,
     actual_mask == 1
 ).sum()
+tn = np.logical_and(
+    predicted_mask == 0,
+    actual_mask == 0
+).sum()
 
+fp = np.logical_and(
+    predicted_mask == 1,
+    actual_mask == 0
+).sum()
+
+fn = np.logical_and(
+    predicted_mask == 0,
+    actual_mask == 1
+).sum()
+
+accuracy = (tp + tn) / (tp + tn + fp + fn)
+
+precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+
+recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+
+f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+
+iou = tp / (tp + fp + fn) if (tp + fp + fn) > 0 else 0
+
+print("TP:", tp)
+print("TN:", tn)
+print("FP:", fp)
+print("FN:", fn)
+
+print("Accuracy:", accuracy * 100, "%")
+print("Precision:", precision * 100, "%")
+print("Recall:", recall * 100, "%")
+print("F1 Score:", f1 * 100, "%")
+print("IoU:", iou * 100, "%")
 fp = np.logical_and(
     predicted_mask == 1,
     actual_mask == 0
