@@ -13,7 +13,9 @@ MODEL_PATH = "mhnet_flood_model/mhnet_best.pth"
 IMAGE_SIZE = 256
 BASE_CHANNELS = 32
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device(
+    "cuda" if torch.cuda.is_available() else "cpu"
+)
 
 print("Device:", device)
 
@@ -27,20 +29,33 @@ checkpoint = torch.load(
     map_location=device
 )
 
-model.load_state_dict(checkpoint)
+model.load_state_dict(
+    checkpoint["model_state_dict"]
+)
 
 model.eval()
 
 print("✓ MHNet loaded")
+
+print("Best IoU from checkpoint:",
+      checkpoint.get("best_iou", "N/A"))
+
+print("Training epoch:",
+      checkpoint.get("epoch", "N/A"))
 
 tp = 0
 tn = 0
 fp = 0
 fn = 0
 
+processed_images = 0
+
 image_files = sorted([
-    f for f in os.listdir(IMAGE_DIR)
-    if f.lower().endswith((".jpg", ".jpeg", ".png"))
+    f
+    for f in os.listdir(IMAGE_DIR)
+    if f.lower().endswith(
+        (".jpg", ".jpeg", ".png")
+    )
 ])
 
 print("Images found:", len(image_files))
@@ -52,7 +67,10 @@ for image_name in image_files:
         image_name
     )
 
-    mask_name = os.path.splitext(image_name)[0] + ".png"
+    mask_name = (
+        os.path.splitext(image_name)[0]
+        + ".png"
+    )
 
     mask_path = os.path.join(
         MASK_DIR,
@@ -60,17 +78,31 @@ for image_name in image_files:
     )
 
     if not os.path.exists(mask_path):
-        print("Skipping:", image_name, "- mask not found")
+
+        print(
+            "Skipping:",
+            image_name,
+            "- mask not found"
+        )
+
         continue
 
     image = cv2.imread(image_path)
+
+    if image is None:
+
+        print(
+            "Skipping:",
+            image_name,
+            "- image could not be read"
+        )
+
+        continue
 
     image = cv2.cvtColor(
         image,
         cv2.COLOR_BGR2RGB
     )
-
-    original_h, original_w = image.shape[:2]
 
     image_resized = cv2.resize(
         image,
@@ -86,26 +118,47 @@ for image_name in image_files:
         / 255.0
     )
 
-    image_tensor = image_tensor.unsqueeze(0).to(device)
+    image_tensor = (
+        image_tensor
+        .unsqueeze(0)
+        .to(device)
+    )
 
     with torch.no_grad():
 
-        output = model(image_tensor)
+        output = model(
+            image_tensor
+        )
 
-        prediction = torch.sigmoid(output)
+        prediction = torch.sigmoid(
+            output
+        )
 
         prediction = (
             prediction > 0.5
         ).float()
 
-    predicted_mask = prediction[
-        0, 0
-    ].cpu().numpy().astype(np.uint8)
+    predicted_mask = (
+        prediction[0, 0]
+        .cpu()
+        .numpy()
+        .astype(np.uint8)
+    )
 
     actual_mask = cv2.imread(
         mask_path,
         cv2.IMREAD_GRAYSCALE
     )
+
+    if actual_mask is None:
+
+        print(
+            "Skipping:",
+            image_name,
+            "- mask could not be read"
+        )
+
+        continue
 
     actual_mask = cv2.resize(
         actual_mask,
@@ -141,51 +194,70 @@ for image_name in image_files:
         actual_mask == 1
     ).sum()
 
+    processed_images += 1
+
+    print(
+        "Processed:",
+        processed_images,
+        "/",
+        len(image_files),
+        "-",
+        image_name
+    )
+
 print()
 print("=" * 60)
-print("MHNet TEST SET CONFUSION MATRIX")
+print("MHNet TEST SET RESULTS")
 print("=" * 60)
 
+print()
+print("Images evaluated :", processed_images)
+
+print()
 print("TP :", tp)
 print("TN :", tn)
 print("FP :", fp)
 print("FN :", fn)
 
+total = tp + tn + fp + fn
+
 accuracy = (
-    (tp + tn)
-    /
-    (tp + tn + fp + fn)
-) if (tp + tn + fp + fn) > 0 else 0
+    (tp + tn) / total
+    if total > 0
+    else 0
+)
 
 precision = (
-    tp
-    /
-    (tp + fp)
-) if (tp + fp) > 0 else 0
+    tp / (tp + fp)
+    if (tp + fp) > 0
+    else 0
+)
 
 recall = (
-    tp
-    /
-    (tp + fn)
-) if (tp + fn) > 0 else 0
+    tp / (tp + fn)
+    if (tp + fn) > 0
+    else 0
+)
 
 f1 = (
     2 * precision * recall
-    /
-    (precision + recall)
-) if (precision + recall) > 0 else 0
+    / (precision + recall)
+    if (precision + recall) > 0
+    else 0
+)
 
 iou = (
-    tp
-    /
-    (tp + fp + fn)
-) if (tp + fp + fn) > 0 else 0
+    tp / (tp + fp + fn)
+    if (tp + fp + fn) > 0
+    else 0
+)
 
 dice = (
     2 * tp
-    /
-    (2 * tp + fp + fn)
-) if (2 * tp + fp + fn) > 0 else 0
+    / (2 * tp + fp + fn)
+    if (2 * tp + fp + fn) > 0
+    else 0
+)
 
 print()
 print("Accuracy :", round(accuracy * 100, 2), "%")
@@ -202,27 +274,52 @@ print("=" * 60)
 
 print()
 print("                 Predicted")
-print("              Background    Flood")
-print("Actual")
-print("Background   ", tn, "        ", fp)
-print("Flood        ", fn, "        ", tp)
+print("              Background     Flood")
+print()
+print(
+    "Actual Background",
+    "   ",
+    tn,
+    "       ",
+    fp
+)
+
+print(
+    "Actual Flood     ",
+    "   ",
+    fn,
+    "       ",
+    tp
+)
 
 confusion_matrix = np.array([
     [tn, fp],
     [fn, tp]
 ])
 
-plt.figure(figsize=(7, 6))
+print()
+print(confusion_matrix)
+
+plt.figure(
+    figsize=(7, 6)
+)
 
 plt.imshow(
     confusion_matrix,
     interpolation="nearest"
 )
 
-plt.title("MHNet - Test Set Confusion Matrix")
+plt.title(
+    "MHNet - Test Set Confusion Matrix"
+)
 
-plt.xlabel("Predicted Class")
-plt.ylabel("Actual Class")
+plt.xlabel(
+    "Predicted Class"
+)
+
+plt.ylabel(
+    "Actual Class"
+)
 
 plt.xticks(
     [0, 1],
@@ -235,6 +332,7 @@ plt.yticks(
 )
 
 for i in range(2):
+
     for j in range(2):
 
         plt.text(
