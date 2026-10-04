@@ -392,4 +392,49 @@ print(
 print("=" * 60)
 
 
-# ======================
+# ============================================================
+# CONFUSION MATRIX
+# ============================================================
+
+confusion_matrix = np.array([
+    [tn, fp],
+    [fn, tp]
+])
+
+plt.figure(figsize=(6, 5))
+
+plt.imshow(
+    confusion_matrix,
+    interpolation="nearest"
+)
+
+plt.title("Confusion Matrix - MHNet")
+
+plt.xlabel("Predicted")
+plt.ylabel("Actual")
+
+plt.xticks(
+    [0, 1],
+    ["Background", "Flood"]
+)
+
+plt.yticks(
+    [0, 1],
+    ["Background", "Flood"]
+)
+
+for i in range(2):
+    for j in range(2):
+        plt.text(
+            j,
+            i,
+            confusion_matrix[i, j],
+            ha="center",
+            va="center"
+        )
+
+plt.colorbar(label="Pixel Count")
+
+plt.tight_layout()
+
+plt.show()
