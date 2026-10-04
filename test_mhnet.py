@@ -1,259 +1,161 @@
 import os
 import numpy as np
-from PIL import Image
-
 import torch
-import torch.nn.functional as F
+import cv2
+import matplotlib.pyplot as plt
 
 from mhnet import MHNet
 
-import matplotlib.pyplot as plt
-
-
-# ============================================================
-# SETTINGS
-# ============================================================
-
-IMAGE_PATH = "AIFloodSense/images/387.jpg"
-MASK_PATH = "AIFloodSense/flood_masks/387.png"
+IMAGE_DIR = "AIFloodSense/images"
+MASK_DIR = "AIFloodSense/flood_masks"
 MODEL_PATH = "mhnet_flood_model/mhnet_best.pth"
-OUTPUT_PATH = "training/mhnet_prediction_387.png"
 
 IMAGE_SIZE = 256
 BASE_CHANNELS = 32
-MASK_RATIO = 0.25
 
-
-# ============================================================
-# DEVICE
-# ============================================================
-
-device = torch.device(
-    "cuda"
-    if torch.cuda.is_available()
-    else "cpu"
-)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 print("Device:", device)
 
-
-# ============================================================
-# LOAD MODEL
-# ============================================================
-
-print("Loading MHNet...")
-
 model = MHNet(
     in_channels=3,
-    base_channels=BASE_CHANNELS,
-    mask_ratio=MASK_RATIO
-)
+    base_channels=BASE_CHANNELS
+).to(device)
 
 checkpoint = torch.load(
     MODEL_PATH,
     map_location=device
 )
 
-model.load_state_dict(
-    checkpoint["model_state_dict"]
-)
-
-model = model.to(device)
+model.load_state_dict(checkpoint)
 
 model.eval()
 
 print("✓ MHNet loaded")
 
+tp = 0
+tn = 0
+fp = 0
+fn = 0
 
-# ============================================================
-# LOAD IMAGE
-# ============================================================
+image_files = sorted([
+    f for f in os.listdir(IMAGE_DIR)
+    if f.lower().endswith((".jpg", ".jpeg", ".png"))
+])
 
-image = Image.open(
-    IMAGE_PATH
-).convert("RGB")
+print("Images found:", len(image_files))
 
-original_width, original_height = image.size
+for image_name in image_files:
 
-print(
-    "Original image size:",
-    (original_width, original_height)
-)
-
-
-# ============================================================
-# PREPARE IMAGE
-# ============================================================
-
-input_image = image.resize(
-    (IMAGE_SIZE, IMAGE_SIZE),
-    Image.Resampling.BILINEAR
-)
-
-image_array = np.array(
-    input_image
-).astype(
-    np.float32
-) / 255.0
-
-image_tensor = torch.from_numpy(
-    image_array
-)
-
-# HWC -> CHW
-
-image_tensor = image_tensor.permute(
-    2,
-    0,
-    1
-)
-
-# Add batch dimension
-
-image_tensor = image_tensor.unsqueeze(
-    0
-)
-
-image_tensor = image_tensor.to(
-    device
-)
-
-
-# ============================================================
-# PREDICTION
-# ============================================================
-
-print("Running MHNet prediction...")
-
-with torch.no_grad():
-
-    logits = model(
-        image_tensor
+    image_path = os.path.join(
+        IMAGE_DIR,
+        image_name
     )
 
-    probabilities = torch.sigmoid(
-        logits
+    mask_name = os.path.splitext(image_name)[0] + ".png"
+
+    mask_path = os.path.join(
+        MASK_DIR,
+        mask_name
     )
 
-    prediction = (
-        probabilities >= 0.5
-    ).float()
+    if not os.path.exists(mask_path):
+        print("Skipping:", image_name, "- mask not found")
+        continue
 
+    image = cv2.imread(image_path)
 
-# ============================================================
-# RESIZE PREDICTION TO ORIGINAL IMAGE SIZE
-# ============================================================
+    image = cv2.cvtColor(
+        image,
+        cv2.COLOR_BGR2RGB
+    )
 
-prediction = F.interpolate(
-    prediction,
-    size=(
-        original_height,
-        original_width
-    ),
-    mode="nearest"
-)
+    original_h, original_w = image.shape[:2]
 
-prediction = prediction[
-    0,
-    0
-].cpu().numpy()
+    image_resized = cv2.resize(
+        image,
+        (IMAGE_SIZE, IMAGE_SIZE)
+    )
 
+    image_tensor = (
+        torch.from_numpy(
+            image_resized
+        )
+        .permute(2, 0, 1)
+        .float()
+        / 255.0
+    )
 
-# ============================================================
-# LOAD ACTUAL FLOOD MASK
-# ============================================================
+    image_tensor = image_tensor.unsqueeze(0).to(device)
 
-actual_mask = Image.open(
-    MASK_PATH
-).convert("L")
+    with torch.no_grad():
 
-actual_mask = np.array(
-    actual_mask
-)
+        output = model(image_tensor)
 
-actual_mask = (
-    actual_mask > 127
-).astype(
-    np.uint8
-)
+        prediction = torch.sigmoid(output)
 
+        prediction = (
+            prediction > 0.5
+        ).float()
 
-# ============================================================
-# PREDICTED BINARY MASK
-# ============================================================
+    predicted_mask = prediction[
+        0, 0
+    ].cpu().numpy().astype(np.uint8)
 
-predicted_mask = (
-    prediction > 0.5
-).astype(
-    np.uint8
-)
+    actual_mask = cv2.imread(
+        mask_path,
+        cv2.IMREAD_GRAYSCALE
+    )
 
+    actual_mask = cv2.resize(
+        actual_mask,
+        (IMAGE_SIZE, IMAGE_SIZE),
+        interpolation=cv2.INTER_NEAREST
+    )
 
-# ============================================================
-# FLOOD AREA
-# ============================================================
+    actual_mask = (
+        actual_mask > 127
+    ).astype(np.uint8)
 
-actual_flood_pixels = (
-    actual_mask == 1
-).sum()
+    predicted_mask = (
+        predicted_mask > 0
+    ).astype(np.uint8)
 
-predicted_flood_pixels = (
-    predicted_mask == 1
-).sum()
+    tp += np.logical_and(
+        predicted_mask == 1,
+        actual_mask == 1
+    ).sum()
 
-total_pixels = actual_mask.size
+    tn += np.logical_and(
+        predicted_mask == 0,
+        actual_mask == 0
+    ).sum()
 
-actual_percentage = (
-    actual_flood_pixels
-    /
-    total_pixels
-    *
-    100
-)
+    fp += np.logical_and(
+        predicted_mask == 1,
+        actual_mask == 0
+    ).sum()
 
-predicted_percentage = (
-    predicted_flood_pixels
-    /
-    total_pixels
-    *
-    100
-)
+    fn += np.logical_and(
+        predicted_mask == 0,
+        actual_mask == 1
+    ).sum()
 
+print()
+print("=" * 60)
+print("MHNet TEST SET CONFUSION MATRIX")
+print("=" * 60)
 
-# ============================================================
-# CONFUSION VALUES
-# ============================================================
-
-tp = np.logical_and(
-    predicted_mask == 1,
-    actual_mask == 1
-).sum()
-
-tn = np.logical_and(
-    predicted_mask == 0,
-    actual_mask == 0
-).sum()
-
-fp = np.logical_and(
-    predicted_mask == 1,
-    actual_mask == 0
-).sum()
-
-fn = np.logical_and(
-    predicted_mask == 0,
-    actual_mask == 1
-).sum()
-
-
-# ============================================================
-# METRICS
-# ============================================================
+print("TP :", tp)
+print("TN :", tn)
+print("FP :", fp)
+print("FN :", fn)
 
 accuracy = (
     (tp + tn)
     /
     (tp + tn + fp + fn)
-)
+) if (tp + tn + fp + fn) > 0 else 0
 
 precision = (
     tp
@@ -268,9 +170,7 @@ recall = (
 ) if (tp + fn) > 0 else 0
 
 f1 = (
-    2
-    * precision
-    * recall
+    2 * precision * recall
     /
     (precision + recall)
 ) if (precision + recall) > 0 else 0
@@ -287,131 +187,42 @@ dice = (
     (2 * tp + fp + fn)
 ) if (2 * tp + fp + fn) > 0 else 0
 
-
-# ============================================================
-# SAVE PREDICTION MASK
-# ============================================================
-
-prediction_image = (
-    predicted_mask * 255
-).astype(
-    np.uint8
-)
-
-Image.fromarray(
-    prediction_image
-).save(
-    OUTPUT_PATH
-)
-
-
-# ============================================================
-# RESULTS
-# ============================================================
+print()
+print("Accuracy :", round(accuracy * 100, 2), "%")
+print("IoU      :", round(iou * 100, 2), "%")
+print("Dice     :", round(dice * 100, 2), "%")
+print("Precision:", round(precision * 100, 2), "%")
+print("Recall   :", round(recall * 100, 2), "%")
+print("F1 Score :", round(f1 * 100, 2), "%")
 
 print()
-
+print("=" * 60)
+print("CONFUSION MATRIX")
 print("=" * 60)
 
-print(
-    "MHNet TEST RESULT - 387.jpg"
-)
-
-print("=" * 60)
-
-print(
-    f"Actual flood area    : "
-    f"{actual_percentage:.2f}%"
-)
-
-print(
-    f"Predicted flood area : "
-    f"{predicted_percentage:.2f}%"
-)
-
 print()
-
-print(
-    f"TP       : {tp}"
-)
-
-print(
-    f"TN       : {tn}"
-)
-
-print(
-    f"FP       : {fp}"
-)
-
-print(
-    f"FN       : {fn}"
-)
-
-print()
-
-print(
-    f"Accuracy : "
-    f"{accuracy * 100:.2f}%"
-)
-
-print(
-    f"IoU      : "
-    f"{iou * 100:.2f}%"
-)
-
-print(
-    f"Dice     : "
-    f"{dice * 100:.2f}%"
-)
-
-print(
-    f"Precision: "
-    f"{precision * 100:.2f}%"
-)
-
-print(
-    f"Recall   : "
-    f"{recall * 100:.2f}%"
-)
-
-print(
-    f"F1 Score : "
-    f"{f1 * 100:.2f}%"
-)
-
-print()
-
-print(
-    "Prediction saved to:"
-)
-
-print(
-    OUTPUT_PATH
-)
-
-print("=" * 60)
-
-
-# ============================================================
-# CONFUSION MATRIX
-# ============================================================
+print("                 Predicted")
+print("              Background    Flood")
+print("Actual")
+print("Background   ", tn, "        ", fp)
+print("Flood        ", fn, "        ", tp)
 
 confusion_matrix = np.array([
     [tn, fp],
     [fn, tp]
 ])
 
-plt.figure(figsize=(6, 5))
+plt.figure(figsize=(7, 6))
 
 plt.imshow(
     confusion_matrix,
     interpolation="nearest"
 )
 
-plt.title("Confusion Matrix - MHNet")
+plt.title("MHNet - Test Set Confusion Matrix")
 
-plt.xlabel("Predicted")
-plt.ylabel("Actual")
+plt.xlabel("Predicted Class")
+plt.ylabel("Actual Class")
 
 plt.xticks(
     [0, 1],
@@ -425,15 +236,18 @@ plt.yticks(
 
 for i in range(2):
     for j in range(2):
+
         plt.text(
             j,
             i,
-            confusion_matrix[i, j],
+            str(confusion_matrix[i, j]),
             ha="center",
             va="center"
         )
 
-plt.colorbar(label="Pixel Count")
+plt.colorbar(
+    label="Pixel Count"
+)
 
 plt.tight_layout()
 
