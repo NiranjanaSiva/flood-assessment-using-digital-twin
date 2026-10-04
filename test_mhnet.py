@@ -1,6 +1,5 @@
 import os
 import numpy as np
-
 from PIL import Image
 
 import torch
@@ -8,23 +7,20 @@ import torch.nn.functional as F
 
 from mhnet import MHNet
 
+import matplotlib.pyplot as plt
+
 
 # ============================================================
 # SETTINGS
 # ============================================================
 
 IMAGE_PATH = "AIFloodSense/images/387.jpg"
-
 MASK_PATH = "AIFloodSense/flood_masks/387.png"
-
 MODEL_PATH = "mhnet_flood_model/mhnet_best.pth"
-
 OUTPUT_PATH = "training/mhnet_prediction_387.png"
 
 IMAGE_SIZE = 256
-
 BASE_CHANNELS = 32
-
 MASK_RATIO = 0.25
 
 
@@ -58,16 +54,11 @@ checkpoint = torch.load(
     map_location=device
 )
 
-# The saved file contains model_state_dict
-
 model.load_state_dict(
     checkpoint["model_state_dict"]
 )
 
 model = model.to(device)
-
-# IMPORTANT:
-# eval() disables MHNet masking during testing.
 
 model.eval()
 
@@ -237,6 +228,7 @@ tp = np.logical_and(
     predicted_mask == 1,
     actual_mask == 1
 ).sum()
+
 tn = np.logical_and(
     predicted_mask == 0,
     actual_mask == 0
@@ -252,109 +244,48 @@ fn = np.logical_and(
     actual_mask == 1
 ).sum()
 
-accuracy = (tp + tn) / (tp + tn + fp + fn)
-
-precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-
-recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-
-f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-
-iou = tp / (tp + fp + fn) if (tp + fp + fn) > 0 else 0
-
-print("TP:", tp)
-print("TN:", tn)
-print("FP:", fp)
-print("FN:", fn)
-
-print("Accuracy:", accuracy * 100, "%")
-print("Precision:", precision * 100, "%")
-print("Recall:", recall * 100, "%")
-print("F1 Score:", f1 * 100, "%")
-print("IoU:", iou * 100, "%")
-fp = np.logical_and(
-    predicted_mask == 1,
-    actual_mask == 0
-).sum()
-
-fn = np.logical_and(
-    predicted_mask == 0,
-    actual_mask == 1
-).sum()
-
 
 # ============================================================
-# IoU
+# METRICS
 # ============================================================
 
-union = tp + fp + fn
-
-if union > 0:
-
-    iou = tp / union
-
-else:
-
-    iou = 1.0
-
-
-# ============================================================
-# DICE
-# ============================================================
-
-dice_denominator = (
-    2 * tp
-    +
-    fp
-    +
-    fn
+accuracy = (
+    (tp + tn)
+    /
+    (tp + tn + fp + fn)
 )
 
-if dice_denominator > 0:
+precision = (
+    tp
+    /
+    (tp + fp)
+) if (tp + fp) > 0 else 0
 
-    dice = (
-        2 * tp
-        /
-        dice_denominator
-    )
+recall = (
+    tp
+    /
+    (tp + fn)
+) if (tp + fn) > 0 else 0
 
-else:
+f1 = (
+    2
+    * precision
+    * recall
+    /
+    (precision + recall)
+) if (precision + recall) > 0 else 0
 
-    dice = 1.0
+iou = (
+    tp
+    /
+    (tp + fp + fn)
+) if (tp + fp + fn) > 0 else 0
 
-
-# ============================================================
-# PRECISION
-# ============================================================
-
-if tp + fp > 0:
-
-    precision = (
-        tp
-        /
-        (tp + fp)
-    )
-
-else:
-
-    precision = 0.0
-
-
-# ============================================================
-# RECALL
-# ============================================================
-
-if tp + fn > 0:
-
-    recall = (
-        tp
-        /
-        (tp + fn)
-    )
-
-else:
-
-    recall = 0.0
+dice = (
+    2 * tp
+    /
+    (2 * tp + fp + fn)
+) if (2 * tp + fp + fn) > 0 else 0
 
 
 # ============================================================
@@ -379,9 +310,12 @@ Image.fromarray(
 # ============================================================
 
 print()
+
 print("=" * 60)
 
-print("MHNet TEST RESULT - 387.jpg")
+print(
+    "MHNet TEST RESULT - 387.jpg"
+)
 
 print("=" * 60)
 
@@ -398,37 +332,51 @@ print(
 print()
 
 print(
-    f"IoU       : "
-    f"{iou * 100:.2f}%"
+    f"TP       : {tp}"
 )
 
 print(
-    f"Dice      : "
-    f"{dice * 100:.2f}%"
+    f"TN       : {tn}"
 )
 
 print(
-    f"Precision : "
-    f"{precision * 100:.2f}%"
+    f"FP       : {fp}"
 )
 
 print(
-    f"Recall    : "
-    f"{recall * 100:.2f}%"
+    f"FN       : {fn}"
 )
 
 print()
 
 print(
-    f"TP: {tp}"
+    f"Accuracy : "
+    f"{accuracy * 100:.2f}%"
 )
 
 print(
-    f"FP: {fp}"
+    f"IoU      : "
+    f"{iou * 100:.2f}%"
 )
 
 print(
-    f"FN: {fn}"
+    f"Dice     : "
+    f"{dice * 100:.2f}%"
+)
+
+print(
+    f"Precision: "
+    f"{precision * 100:.2f}%"
+)
+
+print(
+    f"Recall   : "
+    f"{recall * 100:.2f}%"
+)
+
+print(
+    f"F1 Score : "
+    f"{f1 * 100:.2f}%"
 )
 
 print()
@@ -442,3 +390,6 @@ print(
 )
 
 print("=" * 60)
+
+
+# ======================
