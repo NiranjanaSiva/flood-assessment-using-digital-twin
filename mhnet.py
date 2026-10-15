@@ -37,20 +37,18 @@ class LayerNorm2d(nn.Module):
 class MDTA(nn.Module):
 
     def __init__(self, channels, heads=4):
-
         super().__init__()
 
-        self.heads = heads
+        if channels % heads != 0:
+            raise ValueError(
+                f"channels ({channels}) must be divisible by heads ({heads})"
+            )
 
-        self.temperature = nn.Parameter(
-            torch.ones(heads, 1, 1)
-        )
+        self.heads = heads
+        self.temperature = nn.Parameter(torch.ones(heads, 1, 1))
 
         self.qkv = nn.Conv2d(
-            channels,
-            channels * 3,
-            kernel_size=1,
-            bias=False
+            channels, channels * 3, kernel_size=1, bias=False
         )
 
         self.qkv_dw = nn.Conv2d(
@@ -63,105 +61,44 @@ class MDTA(nn.Module):
         )
 
         self.project_out = nn.Conv2d(
-            channels,
-            channels,
-            kernel_size=1,
-            bias=False
+            channels, channels, kernel_size=1, bias=False
         )
 
     def forward(self, x):
-
         b, c, h, w = x.shape
 
-        qkv = self.qkv(x)
-
-        qkv = self.qkv_dw(qkv)
-
+        qkv = self.qkv_dw(self.qkv(x))
         q, k, v = qkv.chunk(3, dim=1)
 
-        # Divide channels into attention heads
-
-        q = q.reshape(
-            b,
-            self.heads,
-            c // self.heads,
-            h * w
-        )
-
-        k = k.reshape(
-            b,
-            self.heads,
-            c // self.heads,
-            h * w
-        )
-
-        v = v.reshape(
-            b,
-            self.heads,
-            c // self.heads,
-            h * w
-        )
-
-        # Normalize query and key
+        q = q.reshape(b, self.heads, c // self.heads, h * w)
+        k = k.reshape(b, self.heads, c // self.heads, h * w)
+        v = v.reshape(b, self.heads, c // self.heads, h * w)
 
         q = F.normalize(q, dim=-1)
-
         k = F.normalize(k, dim=-1)
 
-        # Attention
-
-        attention = torch.matmul(
-            q,
-            k.transpose(-2, -1)
-        )
-
+        attention = torch.matmul(q, k.transpose(-2, -1))
         attention = attention * self.temperature
+        attention = torch.softmax(attention, dim=-1)
 
-        attention = torch.softmax(
-            attention,
-            dim=-1
-        )
-
-        out = torch.matmul(
-            attention,
-            v
-        )
-
-        out = out.reshape(
-            b,
-            c,
-            h,
-            w
-        )
-
-        out = self.project_out(out)
-
-        return out
-
+        out = torch.matmul(attention, v)
+        out = out.reshape(b, c, h, w)
+        return self.project_out(out)
 
 # ============================================================
 # GDFN
 # Gated-Dconv Feed Forward Network
-#
-# Restormer component.
 # ============================================================
 
 class GDFN(nn.Module):
 
-    def __init__(
-        self,
-        channels,
-        expansion=2.66
-    ):
-
+    def __init__(self, channels, expansion=2.66):
         super().__init__()
 
         hidden = int(channels * expansion)
 
         self.project_in = nn.Conv2d(
-            channels,
-            hidden * 2,
-            kernel_size=1
+            channels, hidden * 2, kernel_size=1
         )
 
         self.dwconv = nn.Conv2d(
@@ -173,35 +110,22 @@ class GDFN(nn.Module):
         )
 
         self.project_out = nn.Conv2d(
-            hidden,
-            channels,
-            kernel_size=1
+            hidden, channels, kernel_size=1
         )
 
     def forward(self, x):
-
         x = self.project_in(x)
-
         x = self.dwconv(x)
-
         x1, x2 = x.chunk(2, dim=1)
-
         x = F.gelu(x1) * x2
+        return self.project_out(x)
 
-        x = self.project_out(x)
-
-        return x
-
-
-# ============================================================
-# Restormer Block
+#   3. Estimates a per-pixel uncertainty/log-variance map.
+#   4. Uses uncertainty to gate the latent residual update.
 #
-# Paper Eq. (5):
-#
-# Fout = fGDFN(LN(fMDTA(LN(Fin))))
-#
-# Residual connections are used in the standard Restormer
-# implementation.
+# Note: this is a proposed architecture. Meaningful uncertainty
+# requires suitable training and evaluation; the rest of MHNet's
+# output interface remains unchanged.
 # ============================================================
 
 class RestormerBlock(nn.Module):
@@ -210,45 +134,77 @@ class RestormerBlock(nn.Module):
         self,
         channels,
         heads=4,
-        dropout=0.0
+        dropout=0.0,
+        latent_ratio=1.0,
+        uncertainty_floor=0.05
     ):
-
         super().__init__()
 
-        self.norm1 = LayerNorm2d(channels)
+        latent_channels = max(4, int(channels * latent_ratio))
+        # Keep latent channels divisible by the attention head count.
+        if latent_channels % heads != 0:
+            latent_channels = ((latent_channels + heads - 1) // heads) * heads
 
-        self.mdta = MDTA(
-            channels,
-            heads
-        )
+        self.norm1 = LayerNorm2d(channels)
+        self.mdta = MDTA(channels, heads=heads)
 
         self.norm2 = LayerNorm2d(channels)
+        self.gdfn = GDFN(channels)
 
-        self.gdfn = GDFN(
-            channels
+        # Latent-space projection and processing.
+        self.to_latent = nn.Conv2d(
+            channels, latent_channels, kernel_size=1, bias=False
+        )
+        self.latent_norm = LayerNorm2d(latent_channels)
+        self.latent_attention = MDTA(
+            latent_channels, heads=heads
+        )
+        self.latent_gdfn = GDFN(latent_channels)
+        self.from_latent = nn.Conv2d(
+            latent_channels, channels, kernel_size=1, bias=False
         )
 
-        self.dropout = nn.Dropout2d(
-            dropout
+        # Per-pixel uncertainty estimator. It predicts log variance
+        # from latent features and is kept internal to this block.
+        self.uncertainty_head = nn.Sequential(
+            nn.Conv2d(latent_channels, max(4, latent_channels // 2), 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(max(4, latent_channels // 2), 1, kernel_size=1)
         )
+
+        self.dropout = nn.Dropout2d(dropout)
+        self.uncertainty_floor = uncertainty_floor
+
+        # Start the uncertainty gate near a moderate, stable value.
+        # The uncertainty head itself is still learned during training.
+        nn.init.zeros_(self.uncertainty_head[-1].weight)
+        nn.init.zeros_(self.uncertainty_head[-1].bias)
 
     def forward(self, x):
+        # Original Restormer attention and feed-forward residuals.
+        x = x + self.dropout(self.mdta(self.norm1(x)))
+        x = x + self.dropout(self.gdfn(self.norm2(x)))
 
-        # MDTA
-
-        x = x + self.dropout(
-            self.mdta(
-                self.norm1(x)
-            )
+        # Latent-space processing.
+        latent = self.to_latent(x)
+        latent = latent + self.dropout(
+            self.latent_attention(self.latent_norm(latent))
+        )
+        latent = latent + self.dropout(
+            self.latent_gdfn(self.latent_norm(latent))
         )
 
-        # GDFN
+        # Lower gate values suppress latent updates where predicted
+        # uncertainty is high. Clamp keeps the gate numerically stable.
+        log_variance = self.uncertainty_head(latent)
+        variance = torch.exp(torch.clamp(log_variance, min=-6.0, max=6.0))
+        confidence_gate = 1.0 / (1.0 + variance)
+        confidence_gate = self.uncertainty_floor + (
+            1.0 - self.uncertainty_floor
+        ) * confidence_gate
 
-        x = x + self.dropout(
-            self.gdfn(
-                self.norm2(x)
-            )
-        )
+        latent_update = self.from_latent(latent)
+        x = x + self.dropout(latent_update * confidence_gate)
 
         return x
 
